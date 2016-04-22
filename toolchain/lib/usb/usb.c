@@ -2,14 +2,12 @@
 
 #include <inttypes.h>
 #include <string.h>
-#include <wchar.h>
 
 #include <usb/usb.h>
 #include "usb-internal.h"
 
 static uint8_t ep0_buf[2][EP0_BUFSIZE] __attribute__((aligned(4)));
 struct usbd_t usb;
-
 
 /**
  * Returns: 0 when this is was the last transfer, 1 if there is still
@@ -34,6 +32,12 @@ usb_tx_next(struct usbd_ep_pipe_state_t *s)
 			thislen = s->ep_maxsize;
 
 		void *addr = s->data_buf + s->pos;
+
+		if (s->copy_source) {
+			/* Bounce buffer mode */
+			addr = s->data_buf;
+			memcpy(addr, s->copy_source + s->pos, thislen);
+		}
 		s->pos += thislen;
 		s->transfer_size -= thislen;
 
@@ -60,17 +64,11 @@ usb_tx_next(struct usbd_ep_pipe_state_t *s)
 	return (0);
 }
 
-/**
- * send USB data (IN device transaction)
- *
- * So far this function is specialized for EP 0 only.
- *
- * Returns: size to be transfered, or -1 on error.
- */
-int
-usb_tx(struct usbd_ep_pipe_state_t *s, const void *buf, size_t len, size_t reqlen, ep_callback_t cb, void *cb_data)
+static void
+setup_tx(struct usbd_ep_pipe_state_t *s, const void *buf, size_t len, size_t reqlen, ep_callback_t cb, void *cb_data)
 {
 	s->data_buf = (void *)buf;
+	s->copy_source = NULL;
 	s->transfer_size = len;
 	s->pos = 0;
 	s->callback = cb;
@@ -81,10 +79,28 @@ usb_tx(struct usbd_ep_pipe_state_t *s, const void *buf, size_t len, size_t reqle
 		s->short_transfer = 1;
 	else
 		s->short_transfer = 0;
+}
 
+static void
+submit_tx(struct usbd_ep_pipe_state_t *s)
+{
 	/* usb_tx_next() flips the data toggle, so invert this here. */
 	s->data01 ^= 1;
 	usb_tx_next(s);
+}
+
+/**
+ * send USB data (IN device transaction)
+ *
+ * So far this function is specialized for EP 0 only.
+ *
+ * Returns: size to be transfered, or -1 on error.
+ */
+int
+usb_tx(struct usbd_ep_pipe_state_t *s, const void *buf, size_t len, size_t reqlen, ep_callback_t cb, void *cb_data)
+{
+	setup_tx(s, buf, len, reqlen, cb, cb_data);
+	submit_tx(s);
 	return (s->transfer_size);
 }
 
@@ -165,14 +181,30 @@ usb_rx(struct usbd_ep_pipe_state_t *s, void *buf, size_t len, ep_callback_t cb, 
 int
 usb_ep0_tx_cp(const void *buf, size_t len, size_t reqlen, ep_callback_t cb, void *cb_data)
 {
+	struct usbd_ep_pipe_state_t *s = &usb.ep_state[0].tx;
+	enum usb_ep_pingpong pp = s->pingpong;
+
+	setup_tx(s, ep0_buf[pp], len, reqlen, cb, cb_data);
+	s->copy_source = buf;
+	submit_tx(s);
+	return (s->transfer_size);
+}
+
+void *
+usb_ep0_tx_inplace_prepare(size_t len)
+{
 	enum usb_ep_pingpong pp = usb.ep_state[0].tx.pingpong;
-	void *destbuf = ep0_buf[pp];
 
 	if (len > EP0_BUFSIZE)
-		return (-1);
-	memcpy(destbuf, buf, len);
+		return (NULL);
 
-	return (usb_tx(&usb.ep_state[0].tx, destbuf, len, reqlen, cb, cb_data));
+	return (ep0_buf[pp]);
+}
+
+int
+usb_ep0_tx(const void *buf, size_t len, size_t reqlen, ep_callback_t cb, void *cb_data)
+{
+	return (usb_tx(&usb.ep_state[0].tx, buf, len, reqlen, cb, cb_data));
 }
 
 int
@@ -181,13 +213,52 @@ usb_ep0_rx(void *buf, size_t len, ep_callback_t cb, void *cb_data)
 	return (usb_rx(&usb.ep_state[0].rx, buf, len, cb, cb_data));
 }
 
+
+const struct usbd_config *
+usb_get_config_data(int config)
+{
+	if (config <= 0)
+		config = usb.config;
+
+	if (config != 0)
+		return (usb.identity->configs[config - 1]);
+	else
+		return (NULL);
+}
+
 static int
 usb_set_config(int config)
 {
-	const struct usbd_config *config_data = usb.identity->configs[config - 1];
+	const struct usbd_config *config_data;
 
-	if (config_data->init != NULL)
-		config_data->init(1);
+	if (usb.config != 0 && (config_data = usb_get_config_data(-1))) {
+		if (config_data->init != NULL)
+			config_data->init(0);
+
+		for (const struct usbd_function * const *fp = config_data->function; *fp != NULL; ++fp) {
+			const struct usbd_function *f = *fp;
+			if (f->init != NULL)
+				f->init(f, 0);
+		}
+	}
+
+	if (config != 0) {
+		/* XXX overflow */
+		config_data = usb_get_config_data(config);
+
+		if (!config_data)
+			return (-1);
+
+		for (const struct usbd_function * const *fp = config_data->function; *fp != NULL; ++fp) {
+			const struct usbd_function *f = *fp;
+			if (f->init != NULL)
+				f->init(f, 1);
+		}
+
+		if (config_data->init != NULL)
+			config_data->init(1);
+	}
+	usb.config = config;
 	return (0);
 }
 
@@ -233,10 +304,15 @@ usb_tx_string_desc(int idx, int reqlen)
 
 	for (d = usb.identity->string_descs; idx != 0 && *d != NULL; ++d)
 		--idx;
-	if (*d == NULL)
+	switch ((uintptr_t)*d) {
+	case (uintptr_t)NULL:
 		return (-1);
-	usb_ep0_tx_cp(*d, (*d)->bLength, reqlen, NULL, NULL);
-	return (0);
+	case (uintptr_t)USB_DESC_STRING_SERIALNO:
+		return (usb_tx_serialno(reqlen));
+	default:
+		usb_ep0_tx_cp(*d, (*d)->bLength, reqlen, NULL, NULL);
+		return (0);
+	}
 }
 
 
@@ -251,43 +327,57 @@ usb_handle_control_done(void *data, ssize_t len, void *cbdata)
 }
 
 void
+usb_handle_control_status_cb(ep_callback_t cb)
+{
+	/* empty status transfer */
+	switch (usb.ctrl_dir) {
+	case USB_CTRL_REQ_IN:
+		usb.ep_state[0].rx.data01 = USB_DATA01_DATA1;
+		usb_rx(&usb.ep_state[0].rx, NULL, 0, cb, NULL);
+		break;
+
+	default:
+		usb.ep_state[0].tx.data01 = USB_DATA01_DATA1;
+		usb_ep0_tx_cp(NULL, 0, 1 /* short packet */, cb, NULL);
+		break;
+	}
+}
+
+void
 usb_handle_control_status(int fail)
 {
 	if (fail) {
 		usb_pipe_stall(&usb.ep_state[0].rx);
 		usb_pipe_stall(&usb.ep_state[0].tx);
-		return;
-	}
-
-	/* empty status transfer */
-	switch (usb.ctrl_dir) {
-	case USB_CTRL_REQ_IN:
-		usb.ep_state[0].rx.data01 = USB_DATA01_DATA1;
-		usb_rx(&usb.ep_state[0].rx, NULL, 0, usb_handle_control_done, NULL);
-		break;
-
-	default:
-		usb.ep_state[0].tx.data01 = USB_DATA01_DATA1;
-		usb_ep0_tx_cp(NULL, 0, 1 /* short packet */, usb_handle_control_done, NULL);
-		break;
+	} else {
+		usb_handle_control_status_cb(usb_handle_control_done);
 	}
 }
+
 
 /**
  * Dispatch non-standard request to registered USB functions.
  */
-static void
-usb_handle_control_nonstd(struct usb_ctrl_req_t *req)
+static int
+usb_handle_control_nonstddev(struct usb_ctrl_req_t *req)
 {
 	/* XXX filter by interface/endpoint? */
 	for (struct usbd_function_ctx_header *fh = &usb.functions; fh != NULL; fh = fh->next) {
+		int handle_it = (req->recp == USB_CTRL_REQ_IFACE) ?
+				(req->wIndex >= fh->interface_offset &&
+				(req->wIndex < (fh->interface_offset + fh->function->interface_count))) : 1;
 		/* ->control() returns != 0 if it handled the request */
-		if (fh->function->control != NULL &&
+		if (handle_it &&
+		    fh->function->control != NULL &&
 		    fh->function->control(req, fh))
-			return;
+			return (1);
 	}
 
+	/* Standard requests will be handled by usb_handle_control */
+	if (req->type == USB_CTRL_REQ_STD)
+		return (0);
 	usb_handle_control_status(-1);
+	return (1);
 }
 
 
@@ -333,12 +423,15 @@ usb_handle_control(void *data, ssize_t len, void *cbdata)
 	uint16_t zero16 = 0;
 	int fail = 1;
 
-	usb_clear_transfers();
 	usb.ctrl_dir = req->in;
 
-	if (req->type != USB_CTRL_REQ_STD) {
-		usb_handle_control_nonstd(req);
-		return;
+	/**
+	 * Pass control to our handlers for non standard
+	 * or non device (interface/class/other) requests.
+	 */
+	if (req->type != USB_CTRL_REQ_STD || req->recp != USB_CTRL_REQ_DEV) {
+		if (usb_handle_control_nonstddev(req) != 0)
+			return;
 	}
 
 	/* Only STD requests here */
@@ -428,7 +521,6 @@ usb_setup_control(void)
 
 	usb.ep_state[0].rx.data01 = USB_DATA01_DATA0;
 	usb.ep_state[0].tx.data01 = USB_DATA01_DATA1;
-	usb_pipe_stall(&usb.ep_state[0].tx);
 	usb_rx(&usb.ep_state[0].rx, buf, EP0_BUFSIZE, usb_handle_control, NULL);
 }
 

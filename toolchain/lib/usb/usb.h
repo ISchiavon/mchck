@@ -24,7 +24,8 @@ enum usb_desc_type {
 	USB_DESC_EP = 5,
 	USB_DESC_DEVQUAL = 6,
 	USB_DESC_OTHERSPEED = 7,
-	USB_DESC_POWER = 8
+	USB_DESC_POWER = 8,
+	USB_DESC_IAD = 11
 };
 
 struct usb_desc_type_t {
@@ -144,6 +145,18 @@ struct usb_desc_iface_t {
 };
 CTASSERT_SIZE_BYTE(struct usb_desc_iface_t, 9);
 
+struct usb_desc_iad_t {
+	uint8_t bLength;
+	enum usb_desc_type bDescriptorType : 8; /* = USB_DESC_IAD */
+	uint8_t bFirstInterface;
+	uint8_t bInterfaceCount;
+	enum usb_dev_class bFunctionClass : 8;
+	enum usb_dev_subclass bFunctionSubClass : 8;
+	enum usb_dev_proto bFunctionProtocol : 8;
+	uint8_t iFunction;
+} __packed;
+CTASSERT_SIZE_BYTE(struct usb_desc_iad_t, 8);
+
 struct usb_desc_config_t {
 	uint8_t bLength;
 	enum usb_desc_type bDescriptorType : 8; /* = USB_DESC_CONFIG */
@@ -180,6 +193,7 @@ CTASSERT_SIZE_BYTE(struct usb_desc_string_t, 2);
 			s					\
 	}
 #define USB_DESC_STRING_LANG_ENUS USB_DESC_STRING(u"\x0409")
+#define USB_DESC_STRING_SERIALNO ((const void *)1)
 
 
 struct usb_ctrl_req_t {
@@ -221,7 +235,13 @@ struct usb_ctrl_req_t {
 		}; /* struct */
 		uint16_t type_and_req;
 	}; /* union */
-	uint16_t wValue;
+	union {
+		uint16_t wValue;
+		struct {
+			uint8_t wValueLow;
+			uint8_t wValueHigh;
+		};
+	};
 	uint16_t wIndex;
 	uint16_t wLength;
 };
@@ -285,6 +305,7 @@ typedef void (*ep_callback_t)(void *buf, ssize_t len, void *data);
  * (Artificial) function.  Aggregates one or more interfaces.
  */
 struct usbd_function {
+	void (*init)(const struct usbd_function *, int enable);
 	int (*configure)(int orig_iface, int iface, int altsetting, void *data);
 	int (*control)(struct usb_ctrl_req_t *, void *);
 	int interface_count;
@@ -300,12 +321,18 @@ struct usbd_function_ctx_header {
 	int ep_tx_offset;
 };
 
+
+typedef void (usbd_init_fun_t)(int);
+typedef void (usbd_suspend_resume_fun_t)(void);
+
 /**
  * Configuration.  Contains one or more functions which all will be
  * active concurrently.
  */
 struct usbd_config {
-	void (*init)(int);
+	usbd_init_fun_t *init;
+	usbd_suspend_resume_fun_t *suspend;
+	usbd_suspend_resume_fun_t *resume;
 	/**
 	 * We will not set a config for now, because there is not much to
 	 * configure, except for power
@@ -315,6 +342,7 @@ struct usbd_config {
 	const struct usb_desc_config_t *desc;
 	const struct usbd_function *function[];
 };
+
 
 /**
  * Device.  Contains one or more configurations, out of which only one
@@ -334,6 +362,84 @@ struct usbd_device {
 	((rx_ep_off) + (ep))
 
 
+#define USB__INCREMENT(i, _0) (i + 1)
+#define USB__COUNT_IFACE_EP(i, e)			\
+	__DEFER(USB__COUNT_IFACE_EP_)(__EXPAND i, e)
+#define USB__COUNT_IFACE_EP_(iface, tx_ep, rx_ep, func)   \
+	(iface + USB_FUNCTION_ ## func ## _IFACE_COUNT,	  \
+	 tx_ep + USB_FUNCTION_ ## func ## _TX_EP_COUNT,	  \
+	 rx_ep + USB_FUNCTION_ ## func ## _RX_EP_COUNT)
+#define USB__GET_FUNCTION_IFACE_COUNT(iter, func)	\
+	USB_FUNCTION_ ## func ## _IFACE_COUNT +
+
+#define USB__DEFINE_FUNCTION_DESC(iter, func)				\
+	USB_FUNCTION_DESC_ ## func ## _DECL __CAT(__usb_func_desc, __COUNTER__);
+#define USB__INIT_FUNCTION_DESC(iter, func)	\
+	USB_FUNCTION_DESC_ ## func iter,
+
+#define USB__DEFINE_CONFIG_DESC(confignum, name, ...)			\
+	&((const struct name {						\
+		struct usb_desc_config_t config;			\
+		__REPEAT_INNER(, __EAT, USB__DEFINE_FUNCTION_DESC, __VA_ARGS__) \
+	}){								\
+		.config = {						\
+			.bLength = sizeof(struct usb_desc_config_t),	\
+			.bDescriptorType = USB_DESC_CONFIG,		\
+			.wTotalLength = sizeof(struct name),		\
+			.bNumInterfaces = __REPEAT_INNER(, __EAT, USB__GET_FUNCTION_IFACE_COUNT, __VA_ARGS__) 0, \
+			.bConfigurationValue = confignum,		\
+			.iConfiguration = 0,				\
+			.one = 1,					\
+			.bMaxPower = 50					\
+		},							\
+		__REPEAT_INNER((0, 0, 0), USB__COUNT_IFACE_EP, USB__INIT_FUNCTION_DESC, __VA_ARGS__) \
+	}).config
+
+
+#define USB__DEFINE_CONFIG(iter, args)				\
+	__DEFER(USB__DEFINE_CONFIG_)(iter, __EXPAND args)
+
+#define USB__DEFINE_CONFIG_(confignum, initfun, ...)			\
+	&(const struct usbd_config){					\
+		.init = initfun,					\
+		.desc = USB__DEFINE_CONFIG_DESC(			\
+			confignum,					\
+			__CAT(__usb_desc, __COUNTER__),			\
+			__VA_ARGS__)					\
+	},
+
+#define USB_INIT_DEVICE(vid, pid, manuf, product, ...)			\
+	{								\
+		.dev_desc = &(const struct usb_desc_dev_t){		\
+			.bLength = sizeof(struct usb_desc_dev_t),	\
+			.bDescriptorType = USB_DESC_DEV,		\
+			.bcdUSB = { .maj = 2 },				\
+			.bDeviceClass = USB_DEV_CLASS_SEE_IFACE,	\
+			.bDeviceSubClass = USB_DEV_SUBCLASS_SEE_IFACE,	\
+			.bDeviceProtocol = USB_DEV_PROTO_SEE_IFACE,	\
+			.bMaxPacketSize0 = EP0_BUFSIZE,			\
+			.idVendor = vid,				\
+			.idProduct = pid,				\
+			.bcdDevice = { .raw = 0 },			\
+			.iManufacturer = 1,				\
+			.iProduct = 2,					\
+			.iSerialNumber = 3,				\
+			.bNumConfigurations = __PP_NARG(__VA_ARGS__),	\
+		},							\
+		.string_descs = (const struct usb_desc_string_t * const []){ \
+			USB_DESC_STRING_LANG_ENUS,			\
+			USB_DESC_STRING(manuf),				\
+			USB_DESC_STRING(product),			\
+			USB_DESC_STRING_SERIALNO,			\
+			NULL						\
+		},							\
+		.configs = {						\
+			__REPEAT(1, USB__INCREMENT, USB__DEFINE_CONFIG, __VA_ARGS__) \
+			NULL						\
+		}							\
+	}
+
+
 /* Provided by MD code */
 struct usbd_ep_pipe_state_t;
 
@@ -344,7 +450,6 @@ enum usb_ep_dir usb_get_xfer_dir(struct usb_xfer_info *);
 void usb_enable_xfers(void);
 void usb_set_addr(int);
 void usb_ep_stall(int);
-void usb_clear_transfers(void);
 size_t usb_ep_get_transfer_size(struct usbd_ep_pipe_state_t *);
 void usb_queue_next(struct usbd_ep_pipe_state_t *, void *, size_t);
 void usb_pipe_stall(struct usbd_ep_pipe_state_t *);
@@ -354,20 +459,28 @@ void usb_pipe_disable(struct usbd_ep_pipe_state_t *s);
 #ifdef VUSB
 void vusb_main_loop(void);
 #else
-void usb_intr(void);
+void usb_poll(void);
 #endif
+int usb_tx_serialno(size_t reqlen);
 
 /* Provided by MI code */
 void usb_init(const struct usbd_device *);
 void usb_attach_function(const struct usbd_function *function, struct usbd_function_ctx_header *ctx);
 void usb_handle_transaction(struct usb_xfer_info *);
 void usb_setup_control(void);
+void usb_handle_control_status_cb(ep_callback_t cb);
 void usb_handle_control_status(int);
 struct usbd_ep_pipe_state_t *usb_init_ep(struct usbd_function_ctx_header *ctx, int ep, enum usb_ep_dir dir, size_t size);
 int usb_rx(struct usbd_ep_pipe_state_t *, void *, size_t, ep_callback_t, void *);
 int usb_tx(struct usbd_ep_pipe_state_t *, const void *, size_t, size_t, ep_callback_t, void *);
 
 int usb_ep0_rx(void *, size_t, ep_callback_t, void *);
+void *usb_ep0_tx_inplace_prepare(size_t len);
+int usb_ep0_tx(const void *buf, size_t len, size_t reqlen, ep_callback_t cb, void *cb_data);
 int usb_ep0_tx_cp(const void *, size_t, size_t, ep_callback_t, void *);
+
+#include <usb/dfu.h>
+#include <usb/cdc-acm.h>
+#include <usb/hid.h>
 
 #endif

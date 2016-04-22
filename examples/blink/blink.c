@@ -1,20 +1,19 @@
 #include <mchck.h>
 
+static struct timeout_ctx t;
+
+static void
+blink(void *data)
+{
+	onboard_led(ONBOARD_LED_TOGGLE);
+	timeout_add(&t, 500, blink, NULL);
+}
+
 int
 main(void)
 {
-	/* Enable PORTC clock */
-	SIM.scgc5.portc = 1;
-
-	/* Configure pin as GPIO */
-        PORTC.pcr[0].mux = PCR_MUX_GPIO;
-        PORTC.pcr[0].dse = 1;
-
-	/* Configure pin as output */
-	GPIOC.pddr = 1 << 0;
-
-	for (;;) {
-		for (volatile int i = 1000000; i > 0; --i);
-		GPIOC.ptor = 1 << 0;
-	}
+	timeout_init();
+	/* blink will also setup a timer to itself */
+	blink(NULL);
+	sys_yield_for_frogs();
 }

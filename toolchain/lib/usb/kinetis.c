@@ -1,9 +1,9 @@
-#include <mchck.h>
-
 #define usb_xfer_info USB_STAT_t
 
-#include <usb/usb.h>
+#include <mchck.h>
+
 #include "usb-internal.h"
+
 
 /**
  * Kinetis USB driver notes:
@@ -116,15 +116,8 @@ usb_pipe_disable(struct usbd_ep_pipe_state_t *s)
         USB0.endpt[s->ep_num].raw &= ~((struct USB_ENDPT_t){
                         .eptxen = s->ep_dir == USB_EP_TX,
                                 .eprxen = s->ep_dir == USB_EP_RX,
-                                .ephshk = 1,
                                 .epctldis = 1
                                 }).raw;
-}
-
-/* XXX what is this supposed to do? */
-void
-usb_clear_transfers(void)
-{
 }
 
 size_t
@@ -171,9 +164,20 @@ usb_reset(void)
         usb_restart();
 
         USB0.ctl.raw = ((struct USB_CTL_t){
-                        .txd_suspend = 0,
+                        	.txd_suspend = 0,
                                 .usben = 1
                                 }).raw;
+
+        /* we're only interested in reset and transfers */
+        USB0.inten.raw = ((struct USB_ISTAT_t){
+                        	.tokdne = 1,
+                                .usbrst = 1,
+                                .stall = 1,
+                                .sleep = 1,
+                                }).raw;
+
+        USB0.usbtrc0.usbresmen = 0;
+        USB0.usbctrl.susp = 0;
 }
 
 void
@@ -184,7 +188,8 @@ usb_enable(void)
 
         /* reset module - not sure if needed */
         USB0.usbtrc0.raw = ((struct USB_USBTRC0_t){
-                        .usbreset = 1
+                        	.usbreset = 1,
+                                .usbresmen = 1
                                 }).raw;
         while (USB0.usbtrc0.usbreset)
                 /* NOTHING */;
@@ -194,26 +199,33 @@ usb_enable(void)
         USB0.bdtpage3 = (uintptr_t)bdt >> 24;
 
         USB0.control.raw = ((struct USB_CONTROL_t){
-                        .dppullupnonotg = 1 /* enable pullup */
+                        	.dppullupnonotg = 1 /* enable pullup */
                                 }).raw;
 
         USB0.usbctrl.raw = 0; /* resume peripheral & disable pulldowns */
         usb_reset();          /* this will start usb processing */
 
-        /* we're only interested in reset and transfers */
+        /* really only one thing we want */
         USB0.inten.raw = ((struct USB_ISTAT_t){
-                        .tokdne = 1,
                                 .usbrst = 1,
-                                .stall = 1
                                 }).raw;
 
+        /**
+         * Suspend transceiver now - we'll wake up at reset again.
+         */
+        USB0.usbctrl.susp = 1;
+        USB0.usbtrc0.usbresmen = 1;
+
+#ifndef SHORT_ISR
         int_enable(IRQ_USB0);
+#endif
 }
 
 void
 USB0_Handler(void)
 {
-        struct USB_ISTAT_t stat = USB0.istat;
+        struct USB_ISTAT_t stat = {.raw = USB0.istat.raw };
+
         if (stat.usbrst) {
                 usb_reset();
                 return;
@@ -228,5 +240,81 @@ USB0_Handler(void)
                 struct usb_xfer_info stat = USB0.stat;
                 usb_handle_transaction(&stat);
         }
+        if (stat.sleep) {
+                USB0.inten.sleep = 0;
+                USB0.inten.resume = 1;
+                USB0.usbctrl.susp = 1;
+                USB0.usbtrc0.usbresmen = 1;
+
+                /**
+                 * Clear interrupts now so that we can detect a fresh
+                 * resume later on.
+                 */
+                USB0.istat.raw = stat.raw;
+
+                const struct usbd_config *c = usb_get_config_data(-1);
+                if (c && c->suspend)
+                        c->suspend();
+        }
+        /**
+         * XXX it is unclear whether we will receive a synchronous
+         * resume interrupt if we were in sleep.  This code assumes we
+         * do.
+         */
+        if (stat.resume || USB0.usbtrc0.usb_resume_int) {
+                USB0.inten.resume = 0;
+                USB0.inten.sleep = 1;
+                USB0.usbtrc0.usbresmen = 0;
+                USB0.usbctrl.susp = 0;
+
+                const struct usbd_config *c = usb_get_config_data(-1);
+                if (c && c->resume)
+                        c->resume();
+
+                stat.resume = 1; /* always clear bit */
+        }
         USB0.istat.raw = stat.raw;
+}
+
+void
+usb_poll(void)
+{
+        USB0_Handler();
+}
+
+int
+usb_tx_serialno(size_t reqlen)
+{
+        struct usb_desc_string_t *d;
+        const size_t nregs = 3;
+        /**
+         * actually 4, but UIDH is 0xffffffff.  Also our output buffer
+         * is only 64 bytes, and 128 bit + desc header exceeds this by
+         * 2 bytes.
+         */
+        const size_t len = nregs * 4 * 2 * 2 + sizeof(*d);
+
+        d = usb_ep0_tx_inplace_prepare(len);
+
+        if (d == NULL)
+                return (-1);
+
+        d->bLength = len;
+        d->bDescriptorType = USB_DESC_STRING;
+
+        size_t bufpos = 0;
+        for (size_t reg = 0; reg < nregs; ++reg) {
+                /* registers run MSW first */
+                uint32_t val = (&SIM.uidmh)[reg];
+
+                for (size_t bits = 32; bits > 0; bits -= 4, val <<= 4) {
+                        int nibble = val >> 28;
+
+                        if (nibble > 9)
+                                nibble += 'a' - '9' - 1;
+                        ((char16_t *)d->bString)[bufpos++] = nibble + '0';
+                }
+        }
+        usb_ep0_tx(d, len, reqlen, NULL, NULL);
+        return (0);
 }

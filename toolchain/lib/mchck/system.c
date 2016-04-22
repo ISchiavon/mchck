@@ -1,5 +1,8 @@
 #include <mchck.h>
 
+const uint8_t sys_reset_to_loader_magic[] = "\xff\x00\x7fRESET TO LOADER\x7f\x00\xff";
+
+
 void
 sys_reset(void)
 {
@@ -8,6 +11,13 @@ sys_reset(void)
                                 .sysresetreq = 1
                                 }).raw;
         for (;;);
+}
+
+void
+sys_reset_to_loader(void)
+{
+        memcpy(&VBAT, sys_reset_to_loader_magic, sizeof(sys_reset_to_loader_magic));
+        sys_reset();
 }
 
 void __attribute__((noreturn))
@@ -32,6 +42,24 @@ crit_exit(void)
 {
         if (--crit_nest == 0)
                 __asm__("cpsie i");
+}
+
+int
+crit_active(void)
+{
+        return (crit_nest != 0);
+}
+
+static volatile const char *panic_reason;
+
+void __attribute__((noreturn))
+panic(const char *reason)
+{
+        crit_enter();
+        panic_reason = reason;
+
+        for (;;)
+                /* infinite loop */;
 }
 
 void

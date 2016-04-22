@@ -7,6 +7,7 @@
 #define USB_FUNCTION_DFU_IFACE_COUNT 1
 
 
+/* XXX move into desc */
 #ifndef USB_DFU_TRANSFER_SIZE
 #define USB_DFU_TRANSFER_SIZE	FLASH_SECTOR_SIZE
 #endif
@@ -18,6 +19,16 @@ enum dfu_dev_subclass {
 enum dfu_dev_proto {
         USB_DEV_PROTO_DFU_APP = 0x01,
         USB_DEV_PROTO_DFU_DFU = 0x02
+};
+
+enum dfu_ctrl_req_code {
+        USB_CTRL_REQ_DFU_DETACH = 0,
+        USB_CTRL_REQ_DFU_DNLOAD = 1,
+        USB_CTRL_REQ_DFU_UPLOAD = 2,
+        USB_CTRL_REQ_DFU_GETSTATUS = 3,
+        USB_CTRL_REQ_DFU_CLRSTATUS = 4,
+        USB_CTRL_REQ_DFU_GETSTATE = 5,
+        USB_CTRL_REQ_DFU_ABORT = 6
 };
 
 enum dfu_status {
@@ -54,8 +65,18 @@ enum dfu_state {
         DFU_STATE_dfuERROR = 10
 };
 
+struct dfu_status_t {
+        enum dfu_status bStatus : 8;
+        uint32_t bwPollTimeout : 24;
+        enum dfu_state bState : 8;
+        uint8_t iString;
+} __packed;
+CTASSERT_SIZE_BYTE(struct dfu_status_t, 6);
+
+
 typedef enum dfu_status (*dfu_setup_write_t)(size_t off, size_t len, void **buf);
 typedef enum dfu_status (*dfu_finish_write_t)(void *, size_t off, size_t len);
+typedef void (*dfu_detach_t)(void);
 
 struct dfu_ctx {
         struct usbd_function_ctx_header header;
@@ -95,9 +116,9 @@ struct dfu_function_desc {
 #define USB_FUNCTION_DESC_DFU_DECL                         \
         struct dfu_function_desc
 
-#define USB_FUNCTION_DESC_DFU_NIFACE	1
-#define USB_FUNCTION_DESC_DFU_NRXEP	0
-#define USB_FUNCTION_DESC_DFU_NTXEP	0
+#define USB_FUNCTION_DFU_IFACE_COUNT	1
+#define USB_FUNCTION_DFU_RX_EP_COUNT	0
+#define USB_FUNCTION_DFU_TX_EP_COUNT	0
 
 #define USB_FUNCTION_DESC_DFU(state...)                                 \
         {                                                               \
@@ -130,8 +151,10 @@ struct dfu_function_desc {
 
 
 extern const struct usbd_function dfu_function;
+extern const struct usbd_function dfu_app_function;
 
 void dfu_write_done(enum dfu_status, struct dfu_ctx *ctx);
 void dfu_init(dfu_setup_write_t setup_write, dfu_finish_write_t finish_write, struct dfu_ctx *ctx);
+void dfu_app_init(dfu_detach_t detachcb);
 
 #endif

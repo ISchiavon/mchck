@@ -143,8 +143,8 @@ Default_Reset_Handler(void)
         SIM.sopt2.pllfllsel = SIM_PLLFLLSEL_FLL;
 #endif
 
-	memcpy(&_sdata, &_sidata, (uintptr_t)&_edata - (uintptr_t)&_sdata);
-	memset(&_sbss, 0, (uintptr_t)&_ebss - (uintptr_t)&_sbss);
+        memcpy(&_sdata, &_sidata, (uintptr_t)&_edata - (uintptr_t)&_sdata);
+        memset(&_sbss, 0, (uintptr_t)&_ebss - (uintptr_t)&_sbss);
 
-	main();
+        main();
 }

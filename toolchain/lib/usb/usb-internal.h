@@ -29,6 +29,7 @@ struct usbd_ep_pipe_state_t {
 	size_t transfer_size;
 	size_t pos;
 	uint8_t *data_buf;
+	const uint8_t *copy_source;
 	int short_transfer;
 	ep_callback_t callback;
 	void *callback_data;
@@ -69,3 +70,4 @@ extern struct usbd_t usb;
 
 void usb_restart(void);
 void usb_enable(void);
+const struct usbd_config *usb_get_config_data(int config);

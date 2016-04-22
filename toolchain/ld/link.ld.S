@@ -7,6 +7,8 @@
 
 OUTPUT_FORMAT ("elf32-littlearm", "elf32-bigarm", "elf32-littlearm")
 
+ENTRY(Reset_Handler)
+
 /* Section Definitions */
 SECTIONS
 {
@@ -19,11 +21,16 @@ SECTIONS
  */
 /* PACK SECTIONS START */
         KEEP(*(.isr_vector .isr_vector.*))
+        KEEP(*(.flash_config))
         *(.text .text.* .gnu.linkonce.t.*)
         *(.glue_7t) *(.glue_7)
         *(.rodata .rodata* .gnu.linkonce.r.*)
 /* PACK SECTIONS END */
     } > rom
+
+#ifdef TARGET_SECTIONS_LDSCRIPT
+#include TARGET_SECTIONS_LDSCRIPT
+#endif
 
     .ARM.extab :
     {

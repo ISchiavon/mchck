@@ -93,12 +93,12 @@ union FTFL_FCCOB_t {
                         FTFL_MARGIN_FACTORY = 0x02
                 } margin : 8;
         } read_1s_block;
-        struct ftfl_data_num_words {
+        struct ftfl_data_num_elems {
                 uint32_t addr : 24;
                 enum FTFL_FCMD fcmd : 8;
                 uint8_t _rsvd0;
                 enum FTFL_MARGIN_CHOICE margin : 8;
-                uint16_t num_words;
+                uint16_t num_elems;
         } read_1s_section;
         struct {
                 uint32_t addr : 24;
@@ -126,7 +126,7 @@ union FTFL_FCCOB_t {
                 uint32_t addr : 24;
                 enum FTFL_FCMD fcmd : 8;
         } erase;
-        struct ftfl_data_num_words program_section;
+        struct ftfl_data_num_elems program_section;
         struct {
                 uint8_t _rsvd0[2];
                 enum FTFL_MARGIN_CHOICE margin : 8;
@@ -204,7 +204,7 @@ struct FTFL_CONFIG_t {
         uint8_t key[8];
         uint8_t fprot[4];
         struct FTFL_FSEC_t fsec;
-        uint8_t fopt;
+        struct FTFL_FOPT_t fopt;
         uint8_t feprot;
         uint8_t fdprot;
 };

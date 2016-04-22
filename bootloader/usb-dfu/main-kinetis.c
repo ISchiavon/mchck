@@ -1,7 +1,6 @@
 #include <mchck.h>
 
-#include <usb/usb.h>
-#include <usb/dfu.h>
+#include "dfu.desc.h"
 
 
 /**
@@ -35,16 +34,10 @@ setup_write(size_t off, size_t len, void **buf)
 static enum dfu_status
 finish_write(void *buf, size_t off, size_t len)
 {
-        void *target;
-
         if (len == 0)
                 return (DFU_STATUS_OK);
 
-        target = flash_get_staging_area(off + (uintptr_t)&_app_rom, FLASH_SECTOR_SIZE);
-        if (!target)
-                return (DFU_STATUS_errADDRESS);
-        memcpy(target, buf, len);
-        if (flash_program_sector(off + (uintptr_t)&_app_rom, FLASH_SECTOR_SIZE) != 0)
+        if (flash_program_sector(buf, off + (uintptr_t)&_app_rom, FLASH_SECTOR_SIZE) != 0)
                 return (DFU_STATUS_errADDRESS);
         return (DFU_STATUS_OK);
 }
@@ -52,13 +45,11 @@ finish_write(void *buf, size_t off, size_t len)
 
 static struct dfu_ctx dfu_ctx;
 
-static void
+void
 init_usb_bootloader(int config)
 {
         dfu_init(setup_write, finish_write, &dfu_ctx);
 }
-
-#include "desc.c"
 
 void
 main(void)
@@ -66,13 +57,17 @@ main(void)
         flash_prepare_flashing();
 
         usb_init(&dfu_device);
+#ifdef SHORT_ISR
         for (;;) {
-                usb_intr();
+                usb_poll();
         }
+#else
+        sys_yield_for_frogs();
+#endif
 }
 
 __attribute__((noreturn))
-inline void
+static inline void
 jump_to_app(uintptr_t addr)
 {
         /* addr is in r0 */
@@ -86,13 +81,27 @@ jump_to_app(uintptr_t addr)
 void
 Reset_Handler(void)
 {
+	/**
+         * Disable Watchdog.  We spend too much time in here comparing
+         * the loader magic, which will lead to a watchdog
+         * configuration timeout.
+         */
+	WDOG_UNLOCK = 0xc520;
+	WDOG_UNLOCK = 0xd928;
+	WDOG_STCTRLH &= ~WDOG_STCTRLH_WDOGEN_MASK;
+        /* XXX maybe re-enable watchdog later? */
+
         /**
          * We treat _app_rom as pointer to directly read the stack
          * pointer and check for valid app code.  This is no fool
          * proof method, but it should help for the first flash.
          */
-        if (RCM.srs0.pin || _app_rom == 0xffffffff) {
+        if (RCM.srs0.pin ||
+            _app_rom == 0xffffffff ||
+            memcmp(&VBAT, sys_reset_to_loader_magic, sizeof(sys_reset_to_loader_magic)) == 0) {
                 extern void Default_Reset_Handler(void);
+
+                memset(&VBAT, 0, sizeof(VBAT));
                 Default_Reset_Handler();
         } else {
                 uint32_t addr = (uintptr_t)&_app_rom;

@@ -22,7 +22,8 @@ class Objdump < Array
 
   def parse(f)
     rec = nil
-    `arm-none-eabi-objdump -h #{f}`.split("\n").each do |l|
+    objdump = ENV["OBJDUMP"] || "arm-none-eabi-objdump"
+    `#{objdump} -h #{f}`.split("\n").each do |l|
       case l
       when /^ *\d+ ([.][^\s]+)\s+([0-9a-f]{8})\s+.*?2[*][*](\d+)$/
         rec = Section.new
@@ -40,14 +41,17 @@ class Objdump < Array
 end
 
 class Knapsack
-  def self.calc(el, w)
+  def self.calc(el, capa)
     keep = {}
-    v = [0] * (w + 1)
+    v = [0] * (capa + 1)
     el.each do |e|
       nv = []
-      (w + 1).times do |w|
-        nsize = e.size + v[w - e.size]
-        if e.size < w && nsize > v[w]
+      (capa + 1).times do |w|
+        nsize = nil
+        if e.size <= w
+          nsize = e.size + v[w - e.size]
+        end
+        if e.size < w && nsize && nsize > v[w]
           nv << nsize
           keep[[e, w]] = true
         else
@@ -58,7 +62,7 @@ class Knapsack
       v = nv
     end
 
-    k = w
+    k = capa
     r = []
     el.reverse.each do |e|
       if keep[[e, k]]
